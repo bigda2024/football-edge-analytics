@@ -1,0 +1,22 @@
+resources:
+  jobs:
+    football_pipeline:
+      name: "football_pipeline_${var.environment}"
+
+      # Pas de bloc "job_clusters" : sur Free Edition, l'absence de cluster
+      # explicite fait tourner la tâche en compute serverless.
+
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"   # toutes les 5 minutes
+        timezone_id: "Europe/Paris"
+        pause_status: PAUSED   # reste en pause tant que tu ne l'actives pas explicitement
+
+      tasks:
+        - task_key: ingest_and_fuse
+          notebook_task:
+            notebook_path: ../src/databricks_dedup_notebook.py
+            base_parameters:
+              environment: "${var.environment}"
+              kafka_bootstrap_servers: "${var.kafka_bootstrap_servers}"
+              kafka_username: "admin"
+              kafka_password: "{{secrets/football_pipeline/kafka_password}}"

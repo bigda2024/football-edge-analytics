@@ -1,0 +1,41 @@
+bundle:
+  name: football-edge-analytics
+
+variables:
+  environment:
+    description: "Environnement cible (dev, uat, prod) — détermine le catalogue Unity Catalog utilisé"
+    default: dev
+  kafka_bootstrap_servers:
+    description: "Adresse du broker Kafka (ex. adresse ngrok en dev, cluster managé en uat/prod)"
+    default: "5.tcp.eu.ngrok.io:16888"
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<TON-WORKSPACE>.databricks.com
+      root_path: /Workspace/Users/<ton-email>/.bundle/${bundle.name}/dev
+    variables:
+      environment: dev
+
+  uat:
+    mode: production
+    workspace:
+      host: https://<TON-WORKSPACE>.databricks.com
+      root_path: /Workspace/Users/<ton-email>/.bundle/${bundle.name}/uat
+    variables:
+      environment: uat
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<TON-WORKSPACE>.databricks.com
+      root_path: /Workspace/Users/<ton-email>/.bundle/${bundle.name}/prod
+    variables:
+      environment: prod
+    run_as:
+      user_name: <ton-email>
