@@ -44,7 +44,7 @@ KAFKA_PASSWORD = dbutils.widgets.get("kafka_password")
 # schémas préfixés dans un catalogue unique (ex. main.dev_bronze, main.dev_silver).
 BRONZE_TABLE = f"{ENVIRONMENT}.bronze.match_events_bronze"
 SILVER_TABLE = f"{ENVIRONMENT}.silver.match_events_silver"
-CHECKPOINT_BASE = f"/Volumes/{ENVIRONMENT}/checkpoints/match_events"
+CHECKPOINT_BASE = f"/Volumes/{ENVIRONMENT}/ops/checkpoints/match_events"
 
 CAMERA_IDS = [f"CAM-0{i}" for i in range(1, 9)]
 TOPICS = [f"match-events.{cam.lower()}" for cam in CAMERA_IDS]
