@@ -32,18 +32,23 @@
 dbutils.widgets.dropdown("environment", "dev", ["dev", "uat", "prod"])
 dbutils.widgets.text("kafka_bootstrap_servers", "5.tcp.eu.ngrok.io:16888")
 dbutils.widgets.text("kafka_username", "admin")
-dbutils.widgets.text("kafka_password", "CamStadium2026")
 
 ENVIRONMENT = dbutils.widgets.get("environment")
 KAFKA_BOOTSTRAP_SERVERS = dbutils.widgets.get("kafka_bootstrap_servers")
 KAFKA_USERNAME = dbutils.widgets.get("kafka_username")
-KAFKA_PASSWORD = dbutils.widgets.get("kafka_password")
+# Le mot de passe est lu directement via l'utilitaire Secrets, PAS via un widget/
+# base_parameter : la syntaxe "{{secrets/scope/key}}" n'est pas résolue dans les
+# base_parameters d'une tâche notebook (uniquement dans certains contextes cluster).
+KAFKA_PASSWORD = dbutils.secrets.get(scope="football_pipeline", key="kafka_password")
 
 # Convention : <environment>.<couche>.<table>, ex. dev.bronze.match_events_bronze
 # Si ton instance Free Edition n'autorise qu'un seul catalogue, remplace par des
 # schémas préfixés dans un catalogue unique (ex. main.dev_bronze, main.dev_silver).
 BRONZE_TABLE = f"{ENVIRONMENT}.bronze.match_events_bronze"
 SILVER_TABLE = f"{ENVIRONMENT}.silver.match_events_silver"
+# Chemin de volume Unity Catalog complet : /Volumes/<catalogue>/<schéma>/<volume>/...
+# Le schéma "ops" et le volume "checkpoints" doivent exister au préalable
+# (voir setup_unity_catalog.sql) — un simple répertoire ne suffit pas en UC.
 CHECKPOINT_BASE = f"/Volumes/{ENVIRONMENT}/ops/checkpoints/match_events"
 
 CAMERA_IDS = [f"CAM-0{i}" for i in range(1, 9)]
@@ -96,6 +101,12 @@ raw_stream = (
     .option("kafka.security.protocol", "SASL_PLAINTEXT")
     .option("kafka.sasl.mechanism", "PLAIN")
     .option("kafka.sasl.jaas.config", JAAS_CONFIG)
+    # Timeouts étendus : le tunnel ngrok ajoute une latence de relais qui peut
+    # dépasser les délais par défaut du client Kafka lors de la reconnexion à
+    # l'adresse "officielle" (KAFKA_ADVERTISED_LISTENERS) après le bootstrap initial.
+    .option("kafka.request.timeout.ms", "60000")
+    .option("kafka.default.api.timeout.ms", "60000")
+    .option("kafka.connections.max.idle.ms", "60000")
     .option("subscribe", ",".join(TOPICS))
     .option("startingOffsets", "earliest")
     .option("failOnDataLoss", "false")
