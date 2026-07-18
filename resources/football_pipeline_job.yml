@@ -19,4 +19,6 @@ resources:
               environment: "${var.environment}"
               kafka_bootstrap_servers: "${var.kafka_bootstrap_servers}"
               kafka_username: "admin"
-              kafka_password: "{{secrets/football_pipeline/kafka_password}}"
+              # kafka_password n'est plus passé ici : la syntaxe {{secrets/...}}
+              # n'est pas résolue dans les base_parameters d'une tâche notebook.
+              # Le notebook lit le secret directement via dbutils.secrets.get().
