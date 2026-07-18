@@ -169,7 +169,18 @@ bronze_query = (
     .trigger(availableNow=True)
     .toTable(BRONZE_TABLE)
 )
-bronze_query.awaitTermination()
+try:
+    bronze_query.awaitTermination()
+except Exception as exc:
+    # Le trigger availableNow=True vérifie une dernière fois s'il reste des offsets
+    # après avoir traité tous les micro-batchs disponibles. Sur un tunnel ngrok
+    # gratuit, cette vérification finale peut échouer par timeout MÊME QUAND toutes
+    # les données ont déjà été committées avec succès (chaque micro-batch est validé
+    # indépendamment). On capture cette exception pour ne pas interrompre le reste
+    # du notebook (section silver) à cause d'un simple raté de fin de requête.
+    print(f"Avertissement : la requête bronze s'est terminée avec une exception "
+          f"({exc}). Les données déjà committées restent intactes — voir le compte "
+          f"ci-dessous.")
 print(f"Bronze ({BRONZE_TABLE}) : {spark.table(BRONZE_TABLE).count()} lignes au total")
 
 # COMMAND ----------
@@ -252,7 +263,12 @@ silver_query = (
     .trigger(availableNow=True)
     .toTable(SILVER_TABLE)
 )
-silver_query.awaitTermination()
+try:
+    silver_query.awaitTermination()
+except Exception as exc:
+    print(f"Avertissement : la requête silver s'est terminée avec une exception "
+          f"({exc}). Les données déjà committées restent intactes — voir le compte "
+          f"ci-dessous.")
 print(f"Silver ({SILVER_TABLE}) : {spark.table(SILVER_TABLE).count()} lignes au total")
 
 # COMMAND ----------
