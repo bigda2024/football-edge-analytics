@@ -86,7 +86,7 @@ from pyspark.sql.types import (
 )
 
 JAAS_CONFIG = (
-    "org.apache.kafka.common.security.plain.PlainLoginModule required "
+    "kafkashaded.common.security.plain.PlainLoginModule required "
     f'username="{KAFKA_USERNAME}" password="{KAFKA_PASSWORD}";'
 )
 
