@@ -17,24 +17,24 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://<TON-WORKSPACE>.databricks.com
-      root_path: /Workspace/Users/<ton-email>/.bundle/${bundle.name}/dev
+      host: https://dbc-c787602a-8f9a.cloud.databricks.com/
+      root_path: /Workspace/Users/abdessalem.mars@bigda.fr/.bundle/${bundle.name}/dev
     variables:
       environment: dev
 
   uat:
     mode: production
     workspace:
-      host: https://<TON-WORKSPACE>.databricks.com
-      root_path: /Workspace/Users/<ton-email>/.bundle/${bundle.name}/uat
+      host: https://dbc-c787602a-8f9a.cloud.databricks.com/
+      root_path: /Workspace/Users/abdessalem.mars@bigda.fr/.bundle/${bundle.name}/uat
     variables:
       environment: uat
 
   prod:
     mode: production
     workspace:
-      host: https://<TON-WORKSPACE>.databricks.com
-      root_path: /Workspace/Users/<ton-email>/.bundle/${bundle.name}/prod
+      host: https://dbc-c787602a-8f9a.cloud.databricks.com/
+      root_path: /Workspace/Users/abdessalem.mars@bigda.fr/.bundle/${bundle.name}/prod
     variables:
       environment: prod
     run_as:
