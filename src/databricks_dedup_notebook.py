@@ -30,7 +30,7 @@
 # COMMAND ----------
 
 dbutils.widgets.dropdown("environment", "dev", ["dev", "uat", "prod"])
-dbutils.widgets.text("kafka_bootstrap_servers", "5.tcp.eu.ngrok.io:16888")
+dbutils.widgets.text("kafka_bootstrap_servers", "4.tcp.eu.ngrok.io:11270")
 dbutils.widgets.text("kafka_username", "admin")
 
 ENVIRONMENT = dbutils.widgets.get("environment")
@@ -199,10 +199,17 @@ print(f"Bronze ({BRONZE_TABLE}) : {spark.table(BRONZE_TABLE).count()} lignes au 
 
 # COMMAND ----------
 
-@F.udf("boolean")
-def is_adjacent(cam_a, cam_b):
-    return frozenset({cam_a, cam_b}) in ADJACENCY_PAIRS
+# Spark interdit un UDF Python dans la condition ON d'un LEFT OUTER JOIN
+# ([UNSUPPORTED_FEATURE.PYTHON_UDF_IN_ON_CLAUSE]). On construit donc la condition
+# d'adjacence avec des expressions Spark natives (comparaisons de colonnes), en
+# dérivant la liste des paires ordonnées (a < b) directement de CAMERA_ADJACENCY.
+_ordered_adjacent_pairs = sorted({tuple(sorted(pair)) for pair in ADJACENCY_PAIRS})
 
+adjacency_condition = F.lit(False)
+for cam_a, cam_b in _ordered_adjacent_pairs:
+    adjacency_condition = adjacency_condition | (
+        (F.col("a.camera_id") == cam_a) & (F.col("b.camera_id") == cam_b)
+    )
 
 mergeable = parsed.filter(F.col("event_type").isin(list(MERGEABLE_EVENT_TYPES)))
 not_mergeable = (
@@ -220,7 +227,7 @@ join_condition = (
     (F.col("a.event_type") == F.col("b.event_type"))
     & (F.col("a.team") == F.col("b.team"))
     & (F.col("a.camera_id") < F.col("b.camera_id"))  # évite les paires en double + auto-jointure
-    & is_adjacent(F.col("a.camera_id"), F.col("b.camera_id"))
+    & adjacency_condition
     & (F.col("b.event_ts") >= F.col("a.event_ts"))
     & (F.col("b.event_ts") <= F.col("a.event_ts") + F.expr(f"INTERVAL {DEDUP_WINDOW_SECONDS} SECONDS"))
 )
