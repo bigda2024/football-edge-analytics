@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS {GOLD_ZONE_HEATMAP} (
 # COMMAND ----------
 
 def compute_team_kpis_batch(batch_df, batch_id):
-    if batch_df.rdd.isEmpty():
+    if batch_df.isEmpty():
         return
 
     windowed = (
@@ -190,7 +190,7 @@ team_query = (
 # COMMAND ----------
 
 def compute_player_kpis_batch(batch_df, batch_id):
-    if batch_df.rdd.isEmpty():
+    if batch_df.isEmpty():
         return
 
     batch_agg = batch_df.groupBy("team", "player_jersey").agg(
@@ -259,7 +259,7 @@ player_query = (
 # COMMAND ----------
 
 def compute_zone_heatmap_batch(batch_df, batch_id):
-    if batch_df.rdd.isEmpty():
+    if batch_df.isEmpty():
         return
 
     batch_agg = batch_df.groupBy("team", "zone").agg(
