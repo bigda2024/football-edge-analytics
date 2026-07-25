@@ -218,6 +218,9 @@ not_mergeable = (
     .withColumn("camera_count", F.lit(1))
     .withColumn("dedup_status", F.lit("not_applicable"))
     .withColumn("merged_with_event_id", F.lit(None).cast("string"))
+    # Champs additionnels propagés pour les KPIs Gold (vue joueur, vitesse, résultat
+    # de tacle...) — déjà présents dans event_schema/parsed, simplement pas encore
+    # sélectionnés jusqu'ici. Sans impact sur la logique de dédup elle-même.
 )
 
 a = mergeable.withWatermark("event_ts", "10 seconds").alias("a")
@@ -252,6 +255,14 @@ merged_or_unique = joined.select(
     F.when(F.col("b.event_id").isNotNull(), F.lit(2)).otherwise(F.lit(1)).alias("camera_count"),
     F.when(F.col("b.event_id").isNotNull(), F.lit("merged")).otherwise(F.lit("unique")).alias("dedup_status"),
     F.col("b.event_id").alias("merged_with_event_id"),
+    # Champs additionnels pour les KPIs Gold — pris depuis 'a' (l'événement primaire),
+    # ces attributs sont par événement, pas affectés par la fusion cross-caméra elle-même.
+    F.col("a.player_jersey").alias("player_jersey"),
+    F.col("a.speed_kmh").alias("speed_kmh"),
+    F.col("a.distance_to_goal_m").alias("distance_to_goal_m"),
+    F.col("a.shot_speed_kmh").alias("shot_speed_kmh"),
+    F.col("a.margin_m").alias("margin_m"),
+    F.col("a.outcome").alias("outcome"),
 )
 
 silver_stream = merged_or_unique.unionByName(
@@ -259,6 +270,8 @@ silver_stream = merged_or_unique.unionByName(
         "event_id", "event_type", "team", "match_time", "timestamp_utc",
         "camera_id", "zone", "confidence", "source_cameras", "camera_count",
         "dedup_status", "merged_with_event_id",
+        "player_jersey", "speed_kmh", "distance_to_goal_m",
+        "shot_speed_kmh", "margin_m", "outcome",
     )
 )
 
