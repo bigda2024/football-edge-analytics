@@ -1,32 +1,28 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Gold Layer — KPIs Équipe & Heatmap (Dashboard Coach temps réel)
+# MAGIC # Gold Layer — KPIs Équipe, Joueur & Heatmap (Dashboard Coach temps réel)
 # MAGIC
-# MAGIC Lit la table Silver dédupliquée (`match_events_silver`) et produit 2 tables Gold consommées
+# MAGIC Lit la table Silver dédupliquée (`match_events_silver`) et produit 3 tables Gold consommées
 # MAGIC par le dashboard Lakeview :
 # MAGIC
 # MAGIC 1. `gold.team_kpis`     — vue équipe, par fenêtre glissante 5min/1min (tendance de match)
-# MAGIC 2. `gold.zone_heatmap` — densité d'événements par zone/équipe, cumulée (upsert)
+# MAGIC 2. `gold.player_kpis`  — vue joueur, cumulée sur tout le match (upsert)
+# MAGIC 3. `gold.zone_heatmap` — densité d'événements par zone/équipe, cumulée (upsert)
 # MAGIC
 # MAGIC **Contrainte Free Edition** : `trigger(availableNow=True)` partout, pas de streaming continu.
 # MAGIC
-# MAGIC **⚠️ Limitation actuelle — table `player_kpis` retirée temporairement** : le schéma réel de
-# MAGIC `match_events_silver` ne contient pas `player_jersey`, `speed_kmh`, `distance_to_goal_m`,
-# MAGIC `shot_speed_kmh`, `margin_m` ni `outcome` — ces champs existent dans Bronze (issus du
-# MAGIC simulateur) mais n'ont pas été propagés par le notebook de déduplication Silver, qui ne
-# MAGIC conserve actuellement que les champs communs à tous les types d'événements plus les champs
-# MAGIC de dédup (`source_cameras`, `camera_count`, `dedup_status`, `merged_with_event_id`). Sans
-# MAGIC `player_jersey`, aucune vue par joueur n'est possible. À corriger côté notebook Silver avant
-# MAGIC de réintroduire `player_kpis` (cf. section limites méthodologiques — Unit A, thèse).
+# MAGIC **Restauré le 26/07** : `player_kpis` avait été retiré temporairement car `match_events_silver`
+# MAGIC ne propageait pas encore `player_jersey`/`speed_kmh`/`outcome`. Le notebook
+# MAGIC `databricks_dedup_notebook.py` a depuis été corrigé pour propager ces champs — cette table
+# MAGIC est donc de nouveau générée, de même que `estimated_distance_km`/`tackles_won` dans
+# MAGIC `team_kpis`.
 # MAGIC
 # MAGIC **Choix d'architecture à noter (soutenance)** : le calcul de `possession_pct` nécessite une
-# MAGIC fonction window non-temporelle (`Window.partitionBy` sur la fenêtre de temps), ce qui est
-# MAGIC **interdit directement sur un DataFrame streaming** dans Spark Structured Streaming — même
-# MAGIC en mode `availableNow`. On passe donc par `foreachBatch`, qui transforme chaque micro-batch
-# MAGIC en DataFrame batch classique où ces fonctions redeviennent utilisables. C'est la même famille
-# MAGIC de contrainte que l'interdiction des UDF Python dans les clauses `LEFT OUTER JOIN ON`, et que
-# MAGIC l'absence de `.rdd` sur Spark Connect (serverless) — trois manifestations du même principe :
-# MAGIC le mode serverless de Databricks Free Edition restreint l'accès aux API Spark bas niveau.
+# MAGIC fonction window non-temporelle (`Window.partitionBy` sur la fenêtre de temps), interdite
+# MAGIC directement sur un DataFrame streaming — même en `availableNow`. On passe donc par
+# MAGIC `foreachBatch`, qui redonne un DataFrame batch classique où ces fonctions sont autorisées.
+# MAGIC Même famille de contrainte que l'interdiction des UDF Python dans les `LEFT OUTER JOIN ON`,
+# MAGIC et que l'absence de `.rdd` sur Spark Connect (serverless) — remplacé partout par `.isEmpty()`.
 
 # COMMAND ----------
 
@@ -35,9 +31,11 @@ catalog = dbutils.widgets.get("catalog")
 
 SILVER_TABLE = f"{catalog}.silver.match_events_silver"
 GOLD_TEAM_KPIS = f"{catalog}.gold.team_kpis"
+GOLD_PLAYER_KPIS = f"{catalog}.gold.player_kpis"
 GOLD_ZONE_HEATMAP = f"{catalog}.gold.zone_heatmap"
 
 CHECKPOINT_TEAM = f"/Volumes/{catalog}/ops/checkpoints/gold_team_kpis"
+CHECKPOINT_PLAYER = f"/Volumes/{catalog}/ops/checkpoints/gold_player_kpis"
 CHECKPOINT_ZONE = f"/Volumes/{catalog}/ops/checkpoints/gold_zone_heatmap"
 
 # COMMAND ----------
@@ -48,7 +46,16 @@ from delta.tables import DeltaTable
 
 silver_df = spark.readStream.table(SILVER_TABLE)
 
+# Les player_detection sont du bruit de fond (présence, pas d'action) — exclus des KPIs
+# de jeu, cohérent avec l'exclusion déjà faite pour la dédup cross-caméra.
 action_events = silver_df.filter(F.col("event_type") != "player_detection")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 0. Création des tables Gold (schéma explicite, si absentes)
+# MAGIC
+# MAGIC Nécessaire avant le premier MERGE : `DeltaTable.forName` échoue si la table n'existe pas.
 
 # COMMAND ----------
 
@@ -61,12 +68,30 @@ CREATE TABLE IF NOT EXISTS {GOLD_TEAM_KPIS} (
     team STRING,
     total_events LONG,
     possession_pct DOUBLE,
+    estimated_distance_km DOUBLE,
     sprint_count LONG,
     shots_on_target LONG,
     goals LONG,
     tackles LONG,
+    tackles_won LONG,
     offsides LONG,
     avg_detection_confidence DOUBLE
+) USING DELTA
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {GOLD_PLAYER_KPIS} (
+    team STRING,
+    player_jersey INT,
+    sprint_count LONG,
+    max_speed_kmh DOUBLE,
+    avg_speed_kmh DOUBLE,
+    estimated_distance_km DOUBLE,
+    tackles LONG,
+    tackles_won LONG,
+    shots_on_target LONG,
+    goals LONG,
+    last_updated TIMESTAMP
 ) USING DELTA
 """)
 
@@ -82,6 +107,18 @@ CREATE TABLE IF NOT EXISTS {GOLD_ZONE_HEATMAP} (
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## 1. Team KPIs — fenêtre glissante 5min/1min
+# MAGIC
+# MAGIC - **`possession_pct`** : proxy basé sur la part du volume d'événements d'action par équipe
+# MAGIC   dans la fenêtre — **ce n'est pas une vraie mesure de possession** (nécessiterait un tracking
+# MAGIC   continu du ballon). À documenter comme limite méthodologique (Yin, unité "performance
+# MAGIC   technique du système").
+# MAGIC - **`estimated_distance_km`** : dérivée des événements `sprint` uniquement (vitesse instantanée
+# MAGIC   × durée forfaitaire de 3s par sprint détecté) — proxy également, pas un tracking GPS/UWB.
+
+# COMMAND ----------
+
 def compute_team_kpis_batch(batch_df, batch_id):
     if batch_df.isEmpty():
         return
@@ -94,10 +131,16 @@ def compute_team_kpis_batch(batch_df, batch_id):
         )
         .agg(
             F.count("*").alias("total_events"),
+            F.sum(F.when(F.col("event_type") == "sprint", F.col("speed_kmh") * (3 / 3600.0)).otherwise(0.0)).alias(
+                "estimated_distance_km"
+            ),
             F.sum(F.when(F.col("event_type") == "sprint", 1).otherwise(0)).alias("sprint_count"),
             F.sum(F.when(F.col("event_type") == "shot_on_target", 1).otherwise(0)).alias("shots_on_target"),
             F.sum(F.when(F.col("event_type") == "goal", 1).otherwise(0)).alias("goals"),
             F.sum(F.when(F.col("event_type") == "tackle", 1).otherwise(0)).alias("tackles"),
+            F.sum(
+                F.when((F.col("event_type") == "tackle") & (F.col("outcome") == "won"), 1).otherwise(0)
+            ).alias("tackles_won"),
             F.sum(F.when(F.col("event_type") == "offside", 1).otherwise(0)).alias("offsides"),
             F.avg("confidence").alias("avg_detection_confidence"),
         )
@@ -117,10 +160,12 @@ def compute_team_kpis_batch(batch_df, batch_id):
         "team",
         "total_events",
         "possession_pct",
+        F.round("estimated_distance_km", 3).alias("estimated_distance_km"),
         "sprint_count",
         "shots_on_target",
         "goals",
         "tackles",
+        "tackles_won",
         "offsides",
         F.round("avg_detection_confidence", 3).alias("avg_detection_confidence"),
     )
@@ -134,6 +179,80 @@ team_query = (
     .trigger(availableNow=True)
     .start()
 )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2. Player KPIs — cumulés sur tout le match (MERGE upsert)
+# MAGIC
+# MAGIC Identifiant joueur = `(team, player_jersey)` — pas de `player_id` unique dans le schéma
+# MAGIC de simulation actuel.
+
+# COMMAND ----------
+
+def compute_player_kpis_batch(batch_df, batch_id):
+    if batch_df.isEmpty():
+        return
+
+    batch_agg = batch_df.groupBy("team", "player_jersey").agg(
+        F.sum(F.when(F.col("event_type") == "sprint", 1).otherwise(0)).alias("sprint_count"),
+        F.max(F.when(F.col("event_type") == "sprint", F.col("speed_kmh"))).alias("max_speed_kmh"),
+        F.avg(F.when(F.col("event_type") == "sprint", F.col("speed_kmh"))).alias("avg_speed_kmh"),
+        F.sum(F.when(F.col("event_type") == "sprint", F.col("speed_kmh") * (3 / 3600.0)).otherwise(0.0)).alias(
+            "estimated_distance_km"
+        ),
+        F.sum(F.when(F.col("event_type") == "tackle", 1).otherwise(0)).alias("tackles"),
+        F.sum(
+            F.when((F.col("event_type") == "tackle") & (F.col("outcome") == "won"), 1).otherwise(0)
+        ).alias("tackles_won"),
+        F.sum(F.when(F.col("event_type") == "shot_on_target", 1).otherwise(0)).alias("shots_on_target"),
+        F.sum(F.when(F.col("event_type") == "goal", 1).otherwise(0)).alias("goals"),
+    ).withColumn("last_updated", F.current_timestamp())
+
+    gold_table = DeltaTable.forName(spark, GOLD_PLAYER_KPIS)
+
+    (
+        gold_table.alias("t")
+        .merge(
+            batch_agg.alias("s"),
+            "t.team = s.team AND t.player_jersey = s.player_jersey",
+        )
+        .whenMatchedUpdate(
+            set={
+                "sprint_count": "t.sprint_count + s.sprint_count",
+                "max_speed_kmh": "greatest(t.max_speed_kmh, s.max_speed_kmh)",
+                "avg_speed_kmh": (
+                    "(t.avg_speed_kmh * t.sprint_count + s.avg_speed_kmh * s.sprint_count) "
+                    "/ nullif(t.sprint_count + s.sprint_count, 0)"
+                ),
+                "estimated_distance_km": "t.estimated_distance_km + s.estimated_distance_km",
+                "tackles": "t.tackles + s.tackles",
+                "tackles_won": "t.tackles_won + s.tackles_won",
+                "shots_on_target": "t.shots_on_target + s.shots_on_target",
+                "goals": "t.goals + s.goals",
+                "last_updated": "s.last_updated",
+            }
+        )
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+
+player_query = (
+    action_events.writeStream.foreachBatch(compute_player_kpis_batch)
+    .option("checkpointLocation", CHECKPOINT_PLAYER)
+    .trigger(availableNow=True)
+    .start()
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Zone Heatmap — densité d'événements par zone/équipe (proxy)
+# MAGIC
+# MAGIC Faute de coordonnées pitch réelles (calibration caméra→terrain non faite à ce stade), la
+# MAGIC heatmap est construite sur la `zone` de la caméra source plutôt que sur des coordonnées
+# MAGIC (x, y) continues.
 
 # COMMAND ----------
 
@@ -175,10 +294,16 @@ zone_query = (
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## 4. Attente de fin des 3 jobs (mode availableNow = traitement fini puis arrêt)
+
+# COMMAND ----------
+
 team_query.awaitTermination()
+player_query.awaitTermination()
 zone_query.awaitTermination()
 
 print("Gold layer terminé :")
 print(f"  - {GOLD_TEAM_KPIS}")
+print(f"  - {GOLD_PLAYER_KPIS}")
 print(f"  - {GOLD_ZONE_HEATMAP}")
-print("  - gold.player_kpis : NON GENERE (player_jersey absent de Silver, cf. note en tete de notebook)")
